@@ -5,24 +5,31 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.security import HTTPBearer, HTTPAuthCredentials
+from fastapi import FastAPI, HTTPException, Depends, status, Header
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 import os
 from pathlib import Path
+from typing import Optional
+import hashlib
 
 # Security configuration
 SECRET_KEY = "your-secret-key-change-this-in-production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-security = HTTPBearer()
+
+def hash_password(password: str) -> str:
+    """Simple password hashing using sha256 (for development only)"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a plain password against a hashed password"""
+    return hash_password(plain_password) == hashed_password
 
 
 class UserCredentials(BaseModel):
@@ -43,11 +50,7 @@ class Token(BaseModel):
 
 
 # In-memory user database - stores hashed passwords
-users_db = {
-    "student1": {"password": pwd_context.hash("student_pass"), "role": "student"},
-    "teacher1": {"password": pwd_context.hash("teacher_pass"), "role": "teacher"},
-    "admin1": {"password": pwd_context.hash("admin_pass"), "role": "admin"}
-}
+users_db = {}
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -56,6 +59,21 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+
+# Initialize test users on startup
+def init_users():
+    """Initialize test users with hashed passwords"""
+    if not users_db:
+        users_db["student1"] = {"password": hash_password("student_pass"), "role": "student"}
+        users_db["teacher1"] = {"password": hash_password("teacher_pass"), "role": "teacher"}
+        users_db["admin1"] = {"password": hash_password("admin_pass"), "role": "admin"}
+
+
+@app.on_event("startup")
+def startup_event():
+    """Initialize users when the app starts"""
+    init_users()
 
 
 # Authentication helper functions
@@ -73,12 +91,27 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain password against a hashed password"""
-    return pwd_context.verify(plain_password, hashed_password)
+    return hash_password(plain_password) == hashed_password
 
 
-def get_current_user(credentials: HTTPAuthCredentials = Depends(security)) -> User:
+def get_current_user(authorization: Optional[str] = Header(None)) -> User:
     """Validate the JWT token and return the current user"""
-    token = credentials.credentials
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing"
+        )
+    
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise ValueError("Invalid authentication scheme")
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization header format"
+        )
+    
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
@@ -201,7 +234,7 @@ def register(credentials: UserCredentials):
 
     # Register new user as a student by default
     users_db[credentials.username] = {
-        "password": pwd_context.hash(credentials.password),
+        "password": hash_password(credentials.password),
         "role": "student"
     }
 
